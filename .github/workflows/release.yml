@@ -1,0 +1,121 @@
+name: 镜像 HostDesk 上游发布
+
+on:
+  schedule:
+    # 在源码同步后 37 分钟检查；UTC 02:37。
+    - cron: '37 2 */5 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hostdesk-release-mirror
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: jkjoy/hostdesk
+
+jobs:
+  mirror-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出镜像仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 查询上游最新发布
+        id: upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/latest")"
+          upstream_tag="$(jq -r '.tag_name' <<<"$release_json")"
+          upstream_name="$(jq -r '.name // .tag_name' <<<"$release_json")"
+          is_prerelease="$(jq -r '.prerelease' <<<"$release_json")"
+          is_draft="$(jq -r '.draft' <<<"$release_json")"
+
+          if [[ -z "$upstream_tag" || "$upstream_tag" == "null" ]]; then
+            echo "未获得有效的上游发布标签。" >&2
+            exit 1
+          fi
+          if [[ "$is_draft" == "true" ]]; then
+            echo "上游最新发布为草稿，跳过。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "name=$upstream_name" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: 判断发布是否已经镜像
+        id: exists
+        if: steps.upstream.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mirror_tag="mirror-release-${{ steps.upstream.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$mirror_tag" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "发布 $mirror_tag 已镜像。"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 下载上游发布附件
+        if: steps.upstream.outputs.skip != 'true' && steps.exists.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "${{ steps.upstream.outputs.tag }}" \
+            --repo "${UPSTREAM_REPO}" \
+            --dir release-assets
+          if ! compgen -G 'release-assets/*' >/dev/null; then
+            echo "上游发布没有可下载附件，仍将创建仅含说明的镜像 Release。"
+          fi
+
+      - name: 创建镜像 Release
+        if: steps.upstream.outputs.skip != 'true' && steps.exists.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream_tag="${{ steps.upstream.outputs.tag }}"
+          mirror_tag="mirror-release-${upstream_tag}"
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          # HostDesk 上游发布镜像
+
+          - 上游仓库：https://github.com/${UPSTREAM_REPO}
+          - 上游发布：[${upstream_tag}](https://github.com/${UPSTREAM_REPO}/releases/tag/${upstream_tag})
+          - 镜像时间（UTC）：$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          本 Release 的附件直接下载自上游，未在本镜像仓库重新构建、修改或签名。请遵守上游许可证及适用的第三方条款。
+
+          ## 上游发布说明
+
+          $(gh api "repos/${UPSTREAM_REPO}/releases/tags/${upstream_tag}" --jq '.body // "（上游未提供发布说明。）"')
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$mirror_tag" -m "Mirror HostDesk release $upstream_tag"
+          git push origin "$mirror_tag"
+
+          args=(release create "$mirror_tag" --title "HostDesk 镜像 ${{ steps.upstream.outputs.name }}" --notes-file "$body_file")
+          if [[ "${{ steps.upstream.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          if compgen -G 'release-assets/*' >/dev/null; then
+            args+=(release-assets/*)
+          fi
+          gh "${args[@]}"

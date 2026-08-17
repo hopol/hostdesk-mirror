@@ -1,0 +1,85 @@
+name: 同步 HostDesk 上游源码
+
+on:
+  schedule:
+    # UTC 02:00；每月 1、6、11、16、21、26、31 日运行。
+    - cron: '0 2 */5 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hostdesk-source-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: jkjoy/hostdesk
+  UPSTREAM_BRANCH: main
+  MIRROR_REPO: https://github.com/hopol/hostdesk-mirror
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出镜像仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 获取上游提交
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags
+          echo "commit=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")" >> "$GITHUB_OUTPUT"
+
+      - name: 判断上游是否变化
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_commit="$(git show HEAD:upstream/.sync-info 2>/dev/null | sed -n 's/^commit=//p' | head -n 1 || true)"
+          if [[ "${old_commit}" == "${{ steps.upstream.outputs.commit }}" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 导出上游源码
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf upstream
+          mkdir -p upstream
+          git archive --format=tar "upstream/${UPSTREAM_BRANCH}" | tar -x -C upstream
+
+          commit="${{ steps.upstream.outputs.commit }}"
+          source_ref="$(git describe --tags --always "upstream/${UPSTREAM_BRANCH}")"
+          cat > upstream/.sync-info <<EOF
+          commit=${commit}
+          timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          upstream_url=https://github.com/${UPSTREAM_REPO}
+          upstream_branch=${UPSTREAM_BRANCH}
+          source_ref=${source_ref}
+          EOF
+          echo "source_ref=$source_ref" >> "$GITHUB_ENV"
+          echo "short_commit=${commit:0:7}" >> "$GITHUB_ENV"
+
+      - name: 提交源码镜像并创建标签
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="mirror-source-${short_commit}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream
+          git commit -m "chore: mirror HostDesk source ${source_ref} (${short_commit})"
+          git tag -a "$tag" -m "Mirror HostDesk source ${source_ref} (${short_commit})"
+          git push origin HEAD
+          git push origin "$tag"
