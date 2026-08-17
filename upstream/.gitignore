@@ -1,0 +1,21 @@
+# Build output
+/hostdesk
+/hostdesk.previous
+/dist/
+/node_modules/
+
+# Runtime data and local configuration
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+.env
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp

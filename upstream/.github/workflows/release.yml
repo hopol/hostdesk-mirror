@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Build Vue application
+        run: |
+          npm ci
+          npm run build
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend
+          path: public/app
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: "386"
+            goarm: ""
+            asset: hostdesk-linux-386
+          - goarch: amd64
+            goarm: ""
+            asset: hostdesk-linux-amd64
+          - goarch: arm64
+            goarm: ""
+            asset: hostdesk-linux-arm64
+          - goarch: arm
+            goarm: "7"
+            asset: hostdesk-linux-armv7
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Download frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend
+          path: public/app
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/${{ matrix.asset }}" .
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hostdesk-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare checksums and installer
+        run: |
+          cp install.sh dist/install.sh
+          chmod +x dist/hostdesk-* dist/install.sh
+          cd dist
+          sha256sum hostdesk-* install.sh > checksums.txt
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            dist/hostdesk-linux-* dist/install.sh dist/checksums.txt --clobber
