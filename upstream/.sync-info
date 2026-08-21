@@ -1,5 +1,5 @@
-commit=d01d2f4d6da1e9113155df93697f7796afa003a2
-timestamp=2026-08-17T06:24:16Z
+commit=95d0f7a654c83c97848a6c04b22ac72f24674db2
+timestamp=2026-08-21T02:53:11Z
 upstream_url=https://github.com/jkjoy/hostdesk
 upstream_branch=main
-source_ref=v2.1.6
+source_ref=v2.1.9
